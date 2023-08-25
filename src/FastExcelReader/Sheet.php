@@ -655,7 +655,7 @@ class Sheet
         }
 
         $readArea = $this->area;
-        $rowTemplate = $readArea['col_keys'];
+        $rowTemplate = $readArea['col_keys'] ?? [];
         if (!empty($columnKeys) && is_array($columnKeys)) {
             $firstRowKeys = is_int($resultMode) && ($resultMode & Excel::KEYS_FIRST_ROW);
             $columnKeys = array_combine(array_map('strtoupper', array_keys($columnKeys)), array_values($columnKeys));
