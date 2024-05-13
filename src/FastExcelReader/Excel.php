@@ -234,7 +234,7 @@ class Excel
             if (preg_match('/^\[\$-[0-9A-F]{3,4}].+/', $pattern)) {
                 return true;
             }
-            return (bool)preg_match('/yy|mm|dd|h|MM|ss|[\/\.][dm](;.+)?/', $pattern);
+            return (bool)preg_match('/yy|mm|dd|h|MM|ss|[\/\.][dm](;.+)?/i', $pattern);
         }
 
         return false;
