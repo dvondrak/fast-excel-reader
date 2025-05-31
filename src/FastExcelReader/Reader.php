@@ -2,12 +2,14 @@
 
 namespace avadim\FastExcelReader;
 
+use avadim\FastExcelReader\Interfaces\InterfaceXmlReader;
+
 /**
  * Class Reader
  *
  * @package avadim\FastExcelReader
  */
-class Reader extends \XMLReader
+class Reader extends \XMLReader implements InterfaceXmlReader
 {
     protected string $zipFile;
 
@@ -15,7 +17,12 @@ class Reader extends \XMLReader
 
     protected array $xmlParserProperties = [];
 
-    public function __construct($file, ?array $parserProperties = [])
+
+    /**
+     * @param string $file
+     * @param array|null $parserProperties
+     */
+    public function __construct(string $file, ?array $parserProperties = [])
     {
         $this->zipFile = $file;
         if ($parserProperties) {
@@ -28,6 +35,9 @@ class Reader extends \XMLReader
         $this->close();
     }
 
+    /**
+     * @return array
+     */
     public function entryList(): array
     {
         $result = [];
@@ -82,6 +92,9 @@ class Reader extends \XMLReader
         return $result;
     }
 
+    /**
+     * @return array
+     */
     public function fileList(): array
     {
         $result = [];
@@ -101,21 +114,23 @@ class Reader extends \XMLReader
      *
      * @return bool
      */
-    public function openZip(string $innerFile, string $encoding = null, ?int $options = 0): bool
+    public function openZip(string $innerFile, ?string $encoding = null, ?int $options = 0): bool
     {
         $this->innerFile = $innerFile;
-
         $result = $this->open('zip://' . $this->zipFile . '#' . $innerFile, $encoding, $options);
-        foreach ($this->xmlParserProperties as $property => $value) {
-            $this->setParserProperty($property, $value);
+        if ($result) {
+            foreach ($this->xmlParserProperties as $property => $value) {
+                $this->setParserProperty($property, $value);
+            }
         }
 
-        return $result;
+        return (bool)$result;
     }
 
     /**
      * @return bool
      */
+    #[\ReturnTypeWillChange]
     public function close(): bool
     {
         if ($this->innerFile) {

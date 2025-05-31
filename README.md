@@ -1,16 +1,23 @@
-[![Latest Stable Version](http://poser.pugx.org/avadim/fast-excel-reader/v)](https://packagist.org/packages/avadim/fast-excel-reader)
-[![Total Downloads](http://poser.pugx.org/avadim/fast-excel-reader/downloads)](https://packagist.org/packages/avadim/fast-excel-reader)
-[![License](http://poser.pugx.org/avadim/fast-excel-reader/license)](https://packagist.org/packages/avadim/fast-excel-reader)
-[![PHP Version Require](http://poser.pugx.org/avadim/fast-excel-reader/require/php)](https://packagist.org/packages/avadim/fast-excel-reader)
+[![GitHub Release](https://img.shields.io/github/v/release/aVadim483/fast-excel-reader)](https://packagist.org/packages/avadim/fast-excel-reader)
+[![Packagist Downloads](https://img.shields.io/packagist/dt/avadim/fast-excel-reader?color=%23aa00aa)](https://packagist.org/packages/avadim/fast-excel-reader)
+[![GitHub License](https://img.shields.io/github/license/aVadim483/fast-excel-reader)](https://packagist.org/packages/avadim/fast-excel-reader)
+[![Static Badge](https://img.shields.io/badge/php-%3E%3D7.4-005fc7)](https://packagist.org/packages/avadim/fast-excel-reader)
 
 # FastExcelReader
 
-This library can read Excel compatible spreadsheets in XLSX format (Office 2007+). 
-It only reads data, but it does it very quickly and with minimal memory usage.
+**FastExcelReader** is a part of the FastExcelPhp Project which consists of
+
+* [FastExcelWriter](https://packagist.org/packages/avadim/fast-excel-writer) - to create Excel spreadsheets
+* [FastExcelReader](https://packagist.org/packages/avadim/fast-excel-reader) - to reader Excel spreadsheets
+* [FastExcelTemplator](https://packagist.org/packages/avadim/fast-excel-templator) - to generate Excel spreadsheets from XLSX templates
+* [FastExcelLaravel](https://packagist.org/packages/avadim/fast-excel-laravel) - special **Laravel** edition
 
 ## Introduction
 
-This library is designed to be lightweight, super-fast and requires minimal memory usage. 
+This library is designed to be lightweight, super-fast and requires minimal memory usage.
+
+**FastExcelReader** can read Excel compatible spreadsheets in XLSX format (Office 2007+).
+It only reads data, but it does it very quickly and with minimal memory usage.
 
 **Features**
 
@@ -20,11 +27,6 @@ This library is designed to be lightweight, super-fast and requires minimal memo
 * The library can define and extract images from XLSX files
 * The library can read styling options of cells - formatting patterns, colors, borders, fonts, etc.
 
-By the way, **FastExcelWriter** also exists - https://github.com/aVadim483/fast-excel-writer
-
-And if you are Laravel-developer then you can use special **Laravel** edition -
-[FastExcelLaravel](https://packagist.org/packages/avadim/fast-excel-laravel).
-
 ## Installation
 
 Use `composer` to install **FastExcelReader** into your project:
@@ -33,20 +35,22 @@ Use `composer` to install **FastExcelReader** into your project:
 composer require avadim/fast-excel-reader
 ```
 
-Also you can download package and include autoload file of the library:
-```php
-require 'path/to/fast-excel-writer/src/autoload.php';
-```
-
 Jump to:
 * [Simple example](#simple-example)
 * [Read values row by row in loop](#read-values-row-by-row-in-loop)
 * [Keys in resulting arrays](#keys-in-resulting-arrays)
+* [Empty cells & rows](#empty-cells--rows)
 * [Advanced example](#advanced-example)
 * [Date Formatter](#date-formatter)
 * [Images functions](#images-functions)
 * [Cell value types](#cell-value-types)
 * [How to get complete info about the cell style](#how-to-get-complete-info-about-the-cell-style)
+* [Retrieve data validation rules](#retrieve-data-validation-rules)
+* [Column Widths](#column-widths)
+* [Row Heights](#row-heights)
+* [Freeze Pane Info](#freeze-pane-info)
+* [Tab Color Info](#tab-color-info)
+* [Info about merged cells](#info-about-merged-cells)
 * [Some useful methods](#some-useful-methods)
 
 ## Usage
@@ -159,6 +163,36 @@ foreach ($sheet->nextRow(['A' => 'One', 'B' => 'Two'], Excel::KEYS_FIRST_ROW) as
     // ...
 }
 ```
+NOTE: Every time you call the ```foreach ($sheet->nextRow() as $rowIndex => $row)``` loop, 
+reading data starts from the first row.
+
+But there is an alternative way to read row by row - using the readNextRow() method. 
+In this case, you first need to call the ```$sheet->reset(...)``` method with the required reading parameters, 
+and then you can call `````$sheet-readNextRow()`````. If at some point you need to start reading data from the beginning, 
+you need to call ```$sheet->reset(...)``` again.
+
+```php
+// Init the internal read generator
+$sheet->reset(['A' => 'One', 'B' => 'Two'], Excel::KEYS_FIRST_ROW);
+
+// read the first row
+$rowData = $sheet->readNextRow();
+var_dump($rowData);
+
+// Read the next 3 rows
+for ($i = 0; $i < 3; $i++) {
+    $rowData = $sheet->readNextRow();
+    var_dump($rowData);
+}
+
+// Reset the internal generator and read all rows starting from the first one
+$sheet->reset(['A' => 'One', 'B' => 'Two'], Excel::KEYS_FIRST_ROW);
+$result = [];
+while ($rowData = $sheet->readNextRow()) {
+    $result[] = $rowData;
+}
+var_dump($result);
+```
 
 ### Keys in resulting arrays
 ```php
@@ -252,6 +286,43 @@ Array
 )
 ```
 
+### Empty cells & rows
+
+The library already skips empty cells and empty rows by default. Empty cells are cells where nothing is written, 
+and empty rows are rows where all cells are empty. If a cell contains an empty string, it is not considered empty. 
+But you can change this behavior and skip cells with empty strings.
+
+```php
+$sheet = $excel->sheet();
+
+// Skip empty cells and empty rows
+foreach ($sheet->nextRow() as $rowNum => $rowData) {
+    // handle $rowData
+}
+
+// Skip empty cells and cells with empty strings
+foreach ($sheet->nextRow([], Excel::TREAT_EMPTY_STRING_AS_EMPTY_CELL) as $rowNum => $rowData) {
+    // handle $rowData
+}
+
+// Skip empty cells and empty rows (rows containing only whitespace characters are also considered empty)
+foreach ($sheet->nextRow([], Excel::TRIM_STRINGS | Excel::TREAT_EMPTY_STRING_AS_EMPTY_CELL) as $rowNum => $rowData) {
+    // handle $rowData
+}
+```
+Other way
+```php
+$sheet->reset([], Excel::TRIM_STRINGS | Excel::TREAT_EMPTY_STRING_AS_EMPTY_CELL);
+$rowData = $sheet->readNextRow();
+// do something
+
+$rowData = $sheet->readNextRow();
+// handle next row
+
+// ...
+```
+
+
 ### Advanced example
 ```php
 use \avadim\FastExcelReader\Excel;
@@ -312,24 +383,15 @@ use \avadim\FastExcelReader\Excel;
 
 $excel = Excel::open($file);
 
-/**
- * A callback function that gets the value of each cell 
- *
- * @param int $row Row number
- * @param string $col Column char
- * @param mixed $val Cell value
- *
- * @return bool
- */
-function readCellCallback($row, $col, $val)
-{
-    // Function implementation
+$result = [];
+$excel->readCallback(function ($row, $col, $val) use(&$result) {
+    // Any manipulation here
+    $result[$row][$col] = (string)$val;
 
     // if the function returns true then data reading is interrupted  
     return false;
-}
-
-$excel->readCallback('readCellCallback');
+});
+var_dump($result);
 ```
 
 ### Date Formatter
@@ -381,6 +443,32 @@ $excel->dateFormatter(function($value, $format, $styleIdx) use($excel) {
 
     return $result;
 });
+```
+Sometimes, if a cell's format is specified as a date but does not contain a date, the library may misinterpret this value. To avoid this, you can disable date formatting
+
+![demo date](demo/files/img3.jpg)
+
+Here, cell B1 contains the string "3.2" and cell B2 contains the date 2024-02-03, but both cells are set to the date format
+
+```php
+$excel = Excel::open($file);
+// default mode
+$cells = $sheet->readCells();
+echo $cell['B1']; // -2208798720 - the library tries to interpret the number 3.2 as a timestamp
+echo $cell['B2']; // 1706918400 - timestamp of 2024-02-03
+
+// date formatter is on
+$excel->dateFormatter(true);
+$cells = $sheet->readCells();
+echo $cell['B1']; // '03.01.1900'
+echo $cell['B2']; // '3.2'
+
+// date formatter is off
+$excel->dateFormatter(false);
+$cells = $sheet->readCells();
+echo $cell['B1']; // '3.2'
+echo $cell['B2']; // 1706918400 - timestamp of 2024-02-03
+
 ```
 
 ### Images functions
@@ -452,7 +540,7 @@ Array
 )
 ```
 
-## How to get complete info about the cell style 
+## How to get complete info about the cell style
 
 Usually read functions return just cell values, but you can read the values with styles.
 In this case, for each cell, not a scalar value will be returned, but an array 
@@ -522,6 +610,146 @@ array (
 ```
 But we do not recommend using these methods with large files
 
+## Retrieve data validation rules
+Every sheet in your XLSX file can contain a set of data validation rules. To retrieve them, you can imply call `getDataValidations` on your sheet
+
+```php
+$excel = Excel::open($file);
+
+$sheet = $excel->sheet();
+
+$validations = $sheet->getDataValidations();
+/*
+[
+  [
+    'type' => 'list',
+    'sqref' => 'E2:E527',
+    'formula1' => '"Berlin,Cape Town,Mexico City,Moscow,Sydney,Tokyo"',
+    'formula2' => null, 
+  ], [
+    'type' => 'decimal',
+    'sqref' => 'G2:G527',
+    'formula1' => '0.0',
+    'formula2' => '999999.0',
+  ],
+]
+*/
+```
+
+## Column Widths
+Retrieve the width of a specific column in a sheet:
+
+```php
+$excel = Excel::open($file);
+$sheet = $excel->selectSheet('SheetName');
+
+// Get the width of column 1 (column 'A')
+$columnWidth = $sheet->getColumnWidth(1);
+
+echo $columnWidth; // Example: 11.85
+```
+
+## Row Heights
+Retrieve the height of a specific row in a sheet:
+
+```php
+$excel = Excel::open($file);
+$sheet = $excel->selectSheet('SheetName');
+
+// Get the height of row 1
+$rowHeight = $sheet->getRowHeight(1);
+
+echo $rowHeight; // Example: 15
+```
+
+## Freeze Pane Info
+Retrieve the freeze pane info for a sheet:
+
+```php
+$excel = Excel::open($file);
+$sheet = $excel->selectSheet('SheetName');
+
+// Get the freeze pane configuration
+$freezePaneConfig = $sheet->getFreezePaneInfo();
+
+print_r($freezePaneConfig);
+/*
+Example Output:
+Array
+(
+    [xSplit] => 0
+    [ySplit] => 1
+    [topLeftCell] => 'A2'
+)
+*/
+```
+
+## Tab Color Info
+Retrieve the tab color info for a sheet:
+
+```php
+Copy code
+$excel = Excel::open($file);
+$sheet = $excel->selectSheet('SheetName');
+
+// Get the tab color configuration
+$tabColorConfig = $sheet->getTabColorInfo();
+
+print_r($tabColorConfig);
+/*
+Example Output:
+Array
+(
+    [theme] => '2'
+    [tint] => '-0.499984740745262'
+)
+*/
+```
+
+## Info about merged cells
+
+You can use the following methods:
+
+* ```Sheet::getMergedCells()``` -- Returns all merged ranges
+* ```Sheet::isMerged(string $cellAddress)``` -- Checks if a cell is merged
+* ```Sheet::mergedRange(string $cellAddress)``` -- Returns merge range of specified cell
+
+For example
+```php
+if ($sheet->isMerged('B3')) {
+    $range = $sheet->mergedRange('B3');
+}
+```
+
+## Count rows and columns
+
+Each sheet contains the ```dimension``` property with the range of the area in which the data is written. 
+If only one cell is filled on the sheet, then there should be an address of only this cell of the form "B2", 
+otherwise it is a range of the form "B2:E10".
+
+There are several methods that get data from this property:
+* ```dimension()``` -- Returns dimension of default work area from sheet properties
+* ```countRows()``` -- Count rows from dimension
+* ```countColumns()``` -- Count columns from dimension
+* ```minRow()``` -- The minimal row number from sheet properties
+* ```maxRows()``` -- The maximal row number from sheet properties
+* ```minColumn()``` -- The minimal column letter from sheet properties
+* ```maxColumn()``` -- The maximal column letter from sheet properties
+
+But sometimes the ```dimension``` property contains incorrect information. 
+For example, it may contain the address of only the first cell of the data range or the address of only the last cell. 
+In such cases, you can use methods that scan the entire sheet and count the actual number of rows and columns with data on the sheet.
+
+IMPORTANT: these methods are slower than methods using the ```dimension``` property
+
+* ```actualDimension()``` -- Returns dimension of the actual work area
+* ```countActualRows()``` -- Count actual rows from the sheet
+* ```minActualRow()``` -- The minimal actual row number
+* ```maxActualRow()``` -- The maximal actual row number
+* ```countActualColumns()``` -- Count actual columns from the sheet
+* ```minActualColumn()``` -- The minimal actual column letter
+* ```maxActualColumn()``` -- The maximal actual column letter
+
 ## Some useful methods
 ### Excel object
 * ```getSheetNames()``` -- Returns names array of all sheets
@@ -536,13 +764,18 @@ But we do not recommend using these methods with large files
 
 ### Sheet object
 * ```name()``` -- Returns name of string
-* ```dimension()``` -- Returns dimension of default work area from sheet properties
-* ```countRows()``` -- Count rows from dimension
-* ```countColumns()``` -- Count columns from dimension
-* ```firstRow()``` -- The first row number
-* ```firstCol()``` -- The first column letter
+* ```isActive()``` -- Active worksheet
+* ```isHidden()``` -- If worksheet is hidden
+* ```isVisible()``` -- If worksheet is visible
+* ```state()``` -- Returns string state of worksheet (used in ```isHidden()``` and ```isVisible()```)
+* ```maxColumn()``` -- The maximal column letter from sheet properties
+* ```firstRow()``` -- The actual number of the first row from the sheet data area (may not match the value from ```minRow()```)
+* ```firstCol()``` -- The actual letter of the first column from the sheet data area (may not match the value from ```minColumn()```)
 * ```readFirstRow()``` -- Returns values of cells of 1st row as array
 * ```readFirstRowWithStyles()``` -- Returns values and styles of cells of 1st row as array
+* ```getColumnWidth(int)``` -- Returns the width of a given column number
+* ```getFreezePaneConfig()``` -- Returns an array containing freeze pane configuration
+* ```getTabColorConfiguration()``` -- Returns an array containing tab color configuration
 
 ## Do you want to support FastExcelReader?
 

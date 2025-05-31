@@ -8,29 +8,31 @@ use PHPUnit\Framework\TestCase;
 
 final class FastExcelReaderTest extends TestCase
 {
-    const DEMO_DIR = __DIR__ . '/../demo/files/';
+    public const DEMO_DIR = __DIR__ . '/../demo/files/';
 
-    public function testExcelReader00()
+    public function testExcelReader00(): void
     {
         // =====================
         $file = self::DEMO_DIR . 'demo-00-test.xlsx';
         $excel = Excel::open($file);
 
-        $this->assertEquals('A1:C4', $excel->sheet()->dimension());
+        $this->assertEquals('A1:D4', $excel->sheet()->dimension());
 
         $result = $excel->readCells();
-        $this->assertTrue(isset($result['A1']) && $result['A1'] === 'name');
-        $this->assertTrue(isset($result['B3']) && $result['B3'] === 6614697600);
+        $this->assertTrue(isset($result['A1']) && $result['A1'] === '#');
+        $this->assertTrue(isset($result['B1']) && $result['B1'] === 'name');
+        $this->assertTrue(isset($result['A2']) && $result['A2'] === 1);
+        $this->assertTrue(isset($result['C3']) && $result['C3'] === 6614697600);
 
         $result = $excel->readRows();
         $this->assertEquals(count($result), $excel->sheet()->countRows());
-        $this->assertTrue(isset($result['1']['A']) && $result['1']['A'] === 'name');
-        $this->assertTrue(isset($result['3']['B']) && $result['3']['B'] === 6614697600);
+        $this->assertTrue(isset($result['1']['B']) && $result['1']['B'] === 'name');
+        $this->assertTrue(isset($result['3']['C']) && $result['3']['C'] === 6614697600);
 
         $result = $excel->readColumns();
         $this->assertEquals(count($result), $excel->sheet()->countCols());
-        $this->assertTrue(isset($result['A']['1']) && $result['A']['1'] === 'name');
-        $this->assertTrue(isset($result['B']['4']) && $result['B']['4'] === -6845212800);
+        $this->assertTrue(isset($result['B']['1']) && $result['B']['1'] === 'name');
+        $this->assertTrue(isset($result['C']['4']) && $result['C']['4'] === -6845212800);
 
         // Read rows and use the first row as column keys
         $result = $excel->readRows(true);
@@ -41,61 +43,79 @@ final class FastExcelReaderTest extends TestCase
         $this->assertTrue(isset($result['name']['3']) && $result['name']['3'] === 'Ellen Louise Ripley');
 
         $result = $excel->readRows(false, Excel::KEYS_ZERO_BASED);
-        $this->assertTrue(isset($result[3][0]) && $result[3][0] === 'Captain Jack Sparrow');
+        $this->assertTrue(isset($result[3][1]) && $result[3][1] === 'Captain Jack Sparrow');
 
         $result = $excel->readRows(false, Excel::KEYS_ONE_BASED);
-        $this->assertTrue(isset($result[1][1]) && $result[1][1] === 'name');
+        $this->assertTrue(isset($result[1][2]) && $result[1][2] === 'name');
 
-        $result = $excel->readRows(['A' => 'Hero', 'C' => 'Secret']);
+        $result = $excel->readRows(['A' => 'Number', 'B' => 'Hero', 'D' => 'Secret']);
         $this->assertFalse(isset($result[0]['Hero']));
+        $this->assertTrue(isset($result[1]['Number']) && $result[1]['Number'] === '#');
         $this->assertTrue(isset($result[1]['Hero']) && $result[1]['Hero'] === 'name');
         $this->assertTrue(isset($result[2]['Hero']) && $result[2]['Hero'] === 'James Bond');
-        $this->assertTrue(isset($result[2]['B']) && $result[2]['B'] === -2205187200);
+        $this->assertTrue(isset($result[2]['C']) && $result[2]['C'] === -2205187200);
         $this->assertTrue(isset($result[2]['Secret']) && $result[2]['Secret'] === 4573);
 
-        $result = $excel->readRows(['A' => 'Hero', 'C' => 'Secret'], Excel::KEYS_FIRST_ROW);
+        $result = $excel->readRows(['A' => 'Number', 'B' => 'Hero', 'D' => 'Secret'], Excel::KEYS_FIRST_ROW);
         $this->assertFalse(isset($result[0]['Hero']));
         $this->assertFalse(isset($result[1]['Hero']));
         $this->assertTrue(isset($result[2]['Hero']) && $result[2]['Hero'] === 'James Bond');
         $this->assertTrue(isset($result[2]['birthday']) && $result[2]['birthday'] === -2205187200);
 
-        $result = $excel->readRows(['A' => 'Hero', 'C' => 'Secret'], Excel::KEYS_FIRST_ROW | Excel::KEYS_ROW_ZERO_BASED);
+        $result = $excel->readRows(['B' => 'Hero', 'D' => 'Secret'], Excel::KEYS_FIRST_ROW | Excel::KEYS_ROW_ZERO_BASED);
         $this->assertTrue(isset($result[0]['Hero']) && $result[0]['Hero'] === 'James Bond');
         $this->assertTrue(isset($result[0]['birthday']) && $result[0]['birthday'] === -2205187200);
 
-        $result = $excel->readRows(['A' => 'Hero', 'C' => 'Secret'], Excel::KEYS_ROW_ZERO_BASED);
+        $result = $excel->readRows(['B' => 'Hero', 'D' => 'Secret'], Excel::KEYS_ROW_ZERO_BASED);
         $this->assertTrue(isset($result[0]['Hero']) && $result[0]['Hero'] === 'name');
-        $this->assertTrue(isset($result[0]['B']) && $result[0]['B'] === 'birthday');
+        $this->assertTrue(isset($result[0]['C']) && $result[0]['C'] === 'birthday');
         $this->assertTrue(isset($result[1]['Hero']) && $result[1]['Hero'] === 'James Bond');
-        $this->assertTrue(isset($result[1]['B']) && $result[1]['B'] === -2205187200);
+        $this->assertTrue(isset($result[1]['C']) && $result[1]['C'] === -2205187200);
 
-        $result = $excel->readRows([]);
-        $this->assertTrue(isset($result[1]['A']) && $result[1]['A'] === 'name');
+        $result = $excel->readRows();
+        $this->assertTrue(isset($result[1]['B']) && $result[1]['B'] === 'name');
 
         $result = $excel->readRows([], Excel::KEYS_FIRST_ROW);
         $this->assertTrue(isset($result[2]['name']) && $result[2]['name'] === 'James Bond');
 
         $result = [];
-        $sheet = $excel->setReadArea('b2');
+        $sheet = $excel->setReadArea('c2');
         foreach ($sheet->nextRow() as $row => $rowData) {
             $result[$row] = $rowData;
         }
         $this->assertCount(3, $result);
         $this->assertFalse(isset($result[1]));
         $this->assertFalse(isset($result[2]['A']));
-        $this->assertTrue(isset($result[2]['B']) && $result[2]['B'] === -2205187200);
-        $this->assertTrue(isset($result[2]['C']) && $result[2]['C'] === 4573);
-        $this->assertFalse(isset($result[2]['D']));
+        $this->assertTrue(isset($result[2]['C']) && $result[2]['C'] === -2205187200);
+        $this->assertTrue(isset($result[2]['D']) && $result[2]['D'] === 4573);
+        $this->assertFalse(isset($result[2]['E']));
+        $this->assertFalse(isset($result[5]));
+
+        $sheet->reset();
+        $result = [];
+        $sheet = $excel->setReadArea('c2');
+        while ($rowData = $sheet->readNextRow()) {
+            $result[] = $rowData;
+        }
+        $this->assertCount(3, $result);
+        $this->assertTrue(isset($result[0]['C']) && $result[0]['C'] === -2205187200);
+        $this->assertTrue(isset($result[0]['D']) && $result[0]['D'] === 4573);
+        $this->assertFalse(isset($result[2]['E']));
         $this->assertFalse(isset($result[5]));
 
         $excel->setDateFormat('Y-m-d');
         $result = $excel->readCells();
-        $this->assertEquals('1900-02-14', $result['B2']);
-        $this->assertEquals('2179-08-12', $result['B3']);
-        $this->assertEquals('1753-01-31', $result['B4']);
+        $this->assertEquals('1900-02-14', $result['C2']);
+        $this->assertEquals('2179-08-12', $result['C3']);
+        $this->assertEquals('1753-01-31', $result['C4']);
+
+        $excel->dateFormatter(false);
+        $sheet = $excel->sheet('Sheet3');
+        $result = $sheet->readCells();
+        $this->assertEquals(['A1' => 1706918400, 'A2' => 1706918400, 'A3' => '3', 'A4' => '3.2', 'A5' => '3.2.24', 'A6' => '3.2.24.7', 'A7' => '3.2.24.d', ], $result);
     }
 
-    public function testExcelReader01()
+    public function testExcelReader01(): void
     {
         // =====================
         $file = self::DEMO_DIR . 'demo-01-base.xlsx';
@@ -178,7 +198,7 @@ final class FastExcelReaderTest extends TestCase
         $excel->getSheet('Demo2')->setReadArea('Values');
     }
 
-    public function testExcelReader03()
+    public function testExcelReader03(): void
     {
         $file = self::DEMO_DIR . 'demo-03-images.xlsx';
         $excel = Excel::open($file);
@@ -190,9 +210,29 @@ final class FastExcelReaderTest extends TestCase
         $result = $excel->getImageList();
         $this->assertTrue(isset($result['Sheet1']['C2']));
         $this->assertEquals('image1.jpeg', $result['Sheet1']['C2']['file_name']);
+
+        $sheet = $excel->sheet();
+        $images = $sheet->getImageList();
+        $this->assertEquals('image1.jpeg', $images['C2']['file_name']);
+        $dir = __DIR__ . '/Files';
+        $file = $sheet->saveImageTo('C2', $dir);
+        $this->assertNotNull($file);
+        $this->assertTrue(is_file($file));
+        unlink($file);
     }
 
-    public function testExcelReader04()
+    public function testExcelReader03Excel365(): void
+    {
+        $file = self::DEMO_DIR . 'demo-03-images-excel-365.xlsx';
+        $excel = Excel::open($file);
+        $this->assertEquals(2, $excel->countImages());
+
+        $this->assertFalse($excel->sheet()->hasImage('c1'));
+        $this->assertTrue($excel->sheet()->hasImage('c2'));
+        $this->assertTrue($excel->sheet()->hasImage('C3'));
+    }
+
+    public function testExcelReader04(): void
     {
         $file = self::DEMO_DIR . 'demo-04-styles.xlsx';
         $excel = Excel::open($file);
@@ -232,7 +272,37 @@ final class FastExcelReaderTest extends TestCase
         $this->assertEquals('#000000', $cells['A6']['border-top-color']);
     }
 
-    public function testDateFormatter()
+    public function testExcelReader06(): void
+    {
+        $file = self::DEMO_DIR . 'demo-06-data-validation.xlsx';
+        $excel = Excel::open($file);
+        $sheet = $excel->getSheet('report');
+
+        $validations = $sheet->getDataValidations();
+
+        $expected = [
+            [
+                'type' => 'decimal',
+                'sqref' => 'G2:G527',
+                'formula1' => '0.0',
+                'formula2' => '999999.0',
+            ], [
+                'type' => 'list',
+                'sqref' => 'E2:E527',
+                'formula1' => '"Berlin,Cape Town,Mexico City,Moscow,Sydney,Tokyo"',
+                'formula2' => null,
+            ], [
+                'type' => 'custom',
+                'sqref' => 'D2:D527',
+                'formula1' => 'OR(NOT(ISERROR(DATEVALUE(D2))), AND(ISNUMBER(D2), LEFT(CELL("format", D2))="D"))',
+                'formula2' => null,
+            ],
+        ];
+
+        $this->assertEquals($expected, $validations);
+    }
+
+    public function testDateFormatter(): void
     {
         // =====================
         $file = self::DEMO_DIR . 'demo-02-advanced.xlsx';
@@ -285,7 +355,7 @@ final class FastExcelReaderTest extends TestCase
         $this->assertEquals('31/12/83', $cells['B2']);
     }
 
-    public function testFillRow()
+    public function testFillRow(): void
     {
         // =====================
         $file = self::DEMO_DIR . 'demo-02-advanced.xlsx';
@@ -329,21 +399,104 @@ final class FastExcelReaderTest extends TestCase
         $file = self::DEMO_DIR . 'demo-00-test.xlsx';
         $excel = Excel::open($file);
         $sheet = $excel->sheet();
-        $sheet->setReadArea('a:d');
+        $sheet->setReadArea('a:e');
         $rows = $sheet->readRows();
-        $this->assertEquals(['A' => 'name', 'B' => 'birthday', 'C' => 'random_int', 'D' => null], $rows[1]);
+        $this->assertEquals(['A' => '#', 'B' => 'name', 'C' => 'birthday', 'D' => 'random_int', 'E' => null], $rows[1]);
 
         $excel = Excel::open($file);
         $sheet = $excel->sheet();
         $rows = $sheet->readRows(Excel::KEYS_FIRST_ROW);
-        $this->assertEquals(['name' => 'James Bond', 'birthday' => -2205187200, 'random_int' => 4573], $rows[2]);
+        $this->assertEquals(['#' => 1, 'name' => 'James Bond', 'birthday' => -2205187200, 'random_int' => 4573], $rows[2]);
 
         $rows = [];
         foreach ($sheet->nextRow([], Excel::KEYS_FIRST_ROW) as $n => $rowData) {
             $rows[$n] = $rowData;
         }
-        $this->assertEquals(['name' => 'James Bond', 'birthday' => -2205187200, 'random_int' => 4573], $rows[2]);
+        $this->assertEquals(['#' => 1, 'name' => 'James Bond', 'birthday' => -2205187200, 'random_int' => 4573], $rows[2]);
+    }
+
+    public function testGetColumnWidth(): void
+    {
+        $file = self::DEMO_DIR . 'demo-07-size-freeze-tabs.xlsx';
+        $excel = Excel::open($file);
+        $width_1 = $excel->selectSheet('report')->getColumnWidth(1);
+        $width_3 = $excel->selectSheet('report')->getColumnWidth(3);
+
+        $this->assertEquals(11.85546875, $width_1);
+        $this->assertEquals(27.85546875, $width_3);
+    }
+
+    public function testGetRowHeight(): void
+    {
+        $file = self::DEMO_DIR . 'demo-07-size-freeze-tabs.xlsx';
+        $excel = Excel::open($file);
+        $height_1 = $excel->selectSheet('report')->getRowHeight(1);
+        $height_3 = $excel->selectSheet('report')->getRowHeight(3);
+
+        $this->assertEquals(15, $height_1);
+        $this->assertEquals(35.25, $height_3);
+    }
+
+    public function testGetFreezePane(): void
+    {
+        $file = self::DEMO_DIR . 'demo-07-size-freeze-tabs.xlsx';
+        $excel = Excel::open($file);
+        $freezePane = $excel->selectSheet('report')->getFreezePaneInfo();
+
+        $this->assertEquals([
+            'xSplit' => 0,
+            'ySplit' => 1,
+            'topLeftCell' => 'A2'
+        ], $freezePane);
+    }
+
+    public function testGetTabColorInfo(): void
+    {
+        $file = self::DEMO_DIR . 'demo-07-size-freeze-tabs.xlsx';
+        $excel = Excel::open($file);
+        $config = $excel->selectSheet('report')->getTabColorInfo();
+
+        $this->assertEquals([
+            'theme' => '2',
+            'tint' => '-0.499984740745262'
+        ], $config);
+    }
+
+    public function testRefPath(): void
+    {
+        // =====================
+        $file = self::DEMO_DIR . 'worksheet-referenced-with-absolute-path.xlsx';
+        $excel = Excel::open($file);
+        $result = $excel->readRows(true, Excel::KEYS_ROW_ZERO_BASED);
+        $this->assertEquals('983ST13', $result[1]['code']);
+        $this->assertEquals(821, $result[1]['price']);
+    }
+
+    public function testExcelReaderDimension(): void
+    {
+        // =====================
+        $file = self::DEMO_DIR . 'demo-00-test.xlsx';
+        $excel = Excel::open($file);
+
+        $this->assertEquals('A1:D4', $excel->sheet()->dimension());
+
+        $result = $excel->readRows();
+        $this->assertEquals(count($result), $excel->sheet()->countRows());
+
+        $this->assertEquals(4, $excel->sheet()->countRows('C3:E6'));
+        $this->assertEquals(3, $excel->sheet()->minRow('C3:E6'));
+        $this->assertEquals(6, $excel->sheet()->maxRow('C3:E6'));
+
+        $this->assertEquals(1, $excel->sheet()->countRows('C3'));
+        $this->assertEquals(6, $excel->sheet()->minRow('E6'));
+        $this->assertEquals(3, $excel->sheet()->maxRow('C3'));
+
+        $result = $excel->readColumns();
+        $this->assertEquals(count($result), $excel->sheet()->countCols());
+
+        $this->assertEquals(3, $excel->sheet()->countColumns('C3:E6'));
+        $this->assertEquals('C', $excel->sheet()->minColumn('C3:E6'));
+        $this->assertEquals('E', $excel->sheet()->maxColumn('C3:E6'));
     }
 
 }
-

@@ -2,9 +2,14 @@
 
 namespace avadim\FastExcelReader;
 
-class Sheet
+use avadim\FastExcelHelper\Helper;
+use avadim\FastExcelReader\Interfaces\InterfaceBookReader;
+use avadim\FastExcelReader\Interfaces\InterfaceSheetReader;
+use avadim\FastExcelReader\Interfaces\InterfaceXmlReader;
+
+class Sheet implements InterfaceSheetReader
 {
-    public Excel $excel;
+    public InterfaceBookReader $excel;
 
     protected string $zipFilename;
 
@@ -12,30 +17,91 @@ class Sheet
 
     protected string $name;
 
-    protected string $path;
+    protected string $state = '';
 
-    protected ?string $dimension = null;
+    protected string $pathInZip;
 
+    protected ?array $dimension = null;
+
+    protected ?array $cols = null;
+
+    protected ?bool $active = null;
     protected array $area = [];
 
     protected array $props = [];
 
+    protected array $images = [];
+
+    protected ?array $mergedCells = null;
+
     /** @var Reader */
-    protected Reader $xmlReader;
+    protected InterfaceXmlReader $xmlReader;
 
+    protected int $readRowNum = 0;
 
-    public function __construct($sheetName, $sheetId, $file, $path)
+    /** @var mixed */
+    protected $preReadFunc = null;
+
+    /** @var mixed */
+    protected $postReadFunc = null;
+
+    protected array $readNodeFunc = [];
+
+    /**
+     * @var \Generator|null
+     */
+    protected ?\Generator $generator = null;
+
+    protected int $countReadRows = 0;
+
+    protected array $sharedFormulas = [];
+
+    protected int $countImages = -1; // -1 - unknown
+
+    protected array $actualRows = [];
+
+    protected array $actualCols = [];
+
+    /**
+     * @var array<array{
+     *  type: string,
+     *  sqref: string,
+     *  formula1: ?string,
+     *  formula2: ?string,
+     * }>|null
+     */
+    protected ?array $validations = null;
+
+    protected ?array $conditionals = null;
+
+    protected ?array $rowHeights = null;
+
+    protected ?array $colWidths = null;
+
+    protected float $defaultRowHeight = 15.0;
+
+    protected ?array $tabProperties = null;
+
+    /**
+     * @param string $sheetName
+     * @param string $sheetId
+     * @param string $file
+     * @param string $path
+     * @param $excel
+     */
+    public function __construct(string $sheetName, string $sheetId, string $file, string $path, $excel)
     {
+        $this->excel = $excel;
         $this->name = $sheetName;
         $this->sheetId = $sheetId;
         $this->zipFilename = $file;
-        $this->path = $path;
+        $this->pathInZip = $path;
 
         $this->area = [
             'row_min' => 1,
             'col_min' => 1,
-            'row_max' => Excel::EXCEL_2007_MAX_ROW,
-            'col_max' => Excel::EXCEL_2007_MAX_COL,
+            'row_max' => Helper::EXCEL_2007_MAX_ROW,
+            'col_max' => Helper::EXCEL_2007_MAX_COL,
             'first_row_keys' => false,
             'col_keys' => [],
         ];
@@ -43,17 +109,16 @@ class Sheet
 
     /**
      * @param $cell
-     * @param $styleIdx
-     * @param $formula
-     * @param $dataType
+     * @param array|null $additionalData
      *
      * @return mixed
      */
-    protected function _cellValue($cell, &$styleIdx = null, &$formula = null, &$dataType = null)
+    protected function _cellValue($cell, ?array &$additionalData = [])
     {
         // Determine data type and style index
-        $dataType = (string)$cell->getAttribute('t');
+        $attributeT = $dataType = (string)$cell->getAttribute('t');
         $styleIdx = (int)$cell->getAttribute('s');
+        $address = $cell->attributes['r']->value;
 
         $cellValue = $formula = null;
         if ($cell->hasChildNodes()) {
@@ -65,10 +130,7 @@ class Sheet
             }
             foreach($cell->childNodes as $node) {
                 if ($node->nodeName === 'f') {
-                    $formula = $node->nodeValue;
-                    if ($formula && ($formula[0] !== '=')) {
-                        $formula = '=' . $formula;
-                    }
+                    $formula = $this->_cellFormula($node, $address);
                     break;
                 }
             }
@@ -86,14 +148,19 @@ class Sheet
                 $cellValue = $str;
             }
         }
-        if ($cellValue && ($dataType === '' || $dataType === 'n'  || $dataType === 's')) { // number or date as string
+        $formatCode = null;
+        if (($cellValue !== null) && ($cellValue !== '') && ($dataType === '' || $dataType === 'n'  || $dataType === 's')) { // number or date as string
             if ($styleIdx > 0 && ($style = $this->excel->styleByIdx($styleIdx))) {
                 if (isset($style['formatType'])) {
                     $dataType = $style['formatType'];
                 }
+                if (isset($style['format'])) {
+                    $formatCode = $style['format'];
+                }
             }
         }
 
+        $originalValue = $cellValue;
         $value = '';
 
         switch ( $dataType ) {
@@ -106,6 +173,9 @@ class Sheet
             case 'inlineStr':
                 // Value is rich text inline
                 $value = $cell->textContent;
+                if ($value && $originalValue === null) {
+                    $originalValue = $value;
+                }
                 $dataType = 'string';
                 break;
 
@@ -117,26 +187,35 @@ class Sheet
 
             case 'd':
             case 'date':
-                $timestamp = $this->excel->timestamp($cellValue);
-
-                if ($timestamp || empty($cellValue)) {
-                    // Value is a date and non-empty
-                    if (!empty($cellValue)) {
-                        $value = $this->excel->formatDate($timestamp, null, $styleIdx);
-                    }
+                if (($cellValue === null) || (trim($cellValue) === '')) {
                     $dataType = 'date';
-                } else {
-                    // Value is not a date, load its original value
-                    $value = (string) $cellValue;
-                    $dataType = 'string';
                 }
+                elseif ($this->excel->getDateFormatter() === false) {
+                    if ($attributeT !== 's' && is_numeric($cellValue)) {
+                        $value = $this->excel->timestamp($cellValue);
+                    }
+                    else {
+                        $value = $originalValue;
+                    }
+                }
+                elseif (($timestamp = $this->excel->timestamp($cellValue))) {
+                    // Value is a date and non-empty
+                    $value = $this->excel->formatDate($timestamp, null, $styleIdx);
+                    $dataType = 'date';
+                }
+                else {
+                    // Value is not a date, load its original value
+                    $value = (string)$cellValue;
+                    //$dataType = 'string';
+                }
+                $dataType = 'date';
                 break;
 
             default:
-                if ($dataType === 'n') {
+                if ($dataType === 'n' || $dataType === 'number') {
                     $dataType = 'number';
                 }
-                elseif ($dataType === 's') {
+                elseif ($dataType === 's' || $dataType === 'string') {
                     $dataType = 'string';
                 }
                 if ($cellValue === null) {
@@ -147,20 +226,52 @@ class Sheet
                     $value = (string)$cellValue;
 
                     // Check for numeric values
-                    if (is_numeric($value)) {
-                        /** @noinspection TypeUnsafeComparisonInspection */
-                        if ($value == (int)$value) {
-                            $value = (int)$value;
+                    if ($dataType !== 'string' && is_numeric($value)) {
+                        if (false !== $castedValue = filter_var($value, FILTER_VALIDATE_INT)) {
+                            $value = $castedValue;
+                            $dataType = 'number';
                         }
-                        /** @noinspection TypeUnsafeComparisonInspection */
-                        elseif ($value == (float)$value) {
-                            $value = (float)$value;
+                        elseif (strlen($value) > 2 && !($value[0] === '0' && $value[1] !== '.') && false !== $castedValue = filter_var($value, FILTER_VALIDATE_FLOAT)) {
+                            $value = $castedValue;
+                            $dataType = 'number';
                         }
+                        /*
+                        if ($formatCode && preg_match('/\.(0+)$/', $formatCode, $m)) {
+                            $value = round($value, strlen($m[1]));
+                        }
+                        */
                     }
                 }
         }
+        $additionalData = ['v' => $value, 's' => $styleIdx, 'f' => $formula, 't' => $dataType, 'o' => $originalValue];
 
         return $value;
+    }
+
+    /**
+     * @param $node
+     * @param string $address
+     *
+     * @return string
+     */
+    protected function _cellFormula($node, string $address): string
+    {
+        $shared = (string)$node->getAttribute('t') === 'shared';
+        $si = (string)$node->getAttribute('si');
+        $formula = $node->nodeValue;
+        if ($formula) {
+            if ($formula[0] !== '=') {
+                $formula = '=' . $formula;
+            }
+            if ($shared && $si > '') {
+                $this->sharedFormulas[$si] = $formula;
+            }
+        }
+        elseif ($shared && $si > '' && isset($this->sharedFormulas[$si])) {
+            $formula = $this->sharedFormulas[$si];
+        }
+
+        return $formula;
     }
 
     /**
@@ -180,6 +291,16 @@ class Sheet
     }
 
     /**
+     * @return string
+     */
+    public function path(): string
+    {
+        return $this->pathInZip;
+    }
+
+    /**
+     * Case-insensitive name checking
+     *
      * @param string $name
      *
      * @return bool
@@ -190,45 +311,173 @@ class Sheet
     }
 
     /**
+     * @return bool
+     */
+    public function isActive(): bool
+    {
+        if ($this->active === null) {
+            $this->_readHeader();
+
+            if ($this->active === null) {
+                $this->active = false;
+            }
+        }
+
+        return $this->active;
+    }
+
+    /**
+     * @param string $state
+     *
+     * @return $this
+     */
+    public function setState(string $state): Sheet
+    {
+        $this->state = $state;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function state(): string
+    {
+        return $this->state;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isVisible(): bool
+    {
+        return !$this->state || $this->state === 'visible';
+    }
+
+    /**
+     * @return bool
+     */
+    public function isHidden(): bool
+    {
+        return $this->state === 'hidden' || $this->state === 'veryHidden';
+    }
+
+    /**
      * @param string|null $file
      *
      * @return Reader
      */
-    protected function getReader(string $file = null): Reader
+    protected function getReader(?string $file = null): InterfaceXmlReader
     {
         if (empty($this->xmlReader)) {
             if (!$file) {
                 $file = $this->zipFilename;
             }
-            $this->xmlReader = new Reader($file);
+            $this->xmlReader = Excel::createReader($file);
         }
 
         return $this->xmlReader;
     }
 
+    protected function _readHeader()
+    {
+        if (!isset($this->dimension['range'])) {
+            $this->dimension = [
+                'range' => '',
+            ];
+            $xmlReader = $this->getReader();
+            $xmlReader->openZip($this->pathInZip);
+            while ($xmlReader->read()) {
+                if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'dimension') {
+                    $range = (string)$xmlReader->getAttribute('ref');
+                    if ($range) {
+                        $this->dimension = Helper::rangeArray($range);
+                        $this->dimension['range'] = $range;
+                    }
+                }
+                if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'sheetView') {
+                    $this->active = (int)$xmlReader->getAttribute('tabSelected');
+                }
+                if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'col') {
+                    if ($xmlReader->hasAttributes) {
+                        $colAttributes = [];
+                        while ($xmlReader->moveToNextAttribute()) {
+                            $colAttributes[$xmlReader->name] = $xmlReader->value;
+                        }
+                        $this->cols[] = $colAttributes;
+                        $xmlReader->moveToElement();
+                    }
+
+                }
+                if ($xmlReader->name === 'sheetData') {
+                    break;
+                }
+            }
+            $xmlReader->close();
+        }
+    }
+
+    protected function _readBottom()
+    {
+        if ($this->mergedCells === null) {
+            $xmlReader = $this->getReader();
+            $xmlReader->openZip($this->pathInZip);
+            while ($xmlReader->read()) {
+                if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'sheetData') {
+                    break;
+                }
+            }
+            $this->mergedCells = [];
+            while ($xmlReader->read()) {
+                if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'mergeCell') {
+                    $ref = (string)$xmlReader->getAttribute('ref');
+                    if ($ref) {
+                        $arr = Helper::rangeArray($ref);
+                        $this->mergedCells[$arr['min_cell']] = $ref;
+                    }
+                }
+            }
+            $xmlReader->close();
+        }
+    }
+
+    /**
+     * @return string|null
+     */
     public function dimension(): ?string
     {
-        if ($this->dimension === null) {
-            $xmlReader = $this->getReader();
-            $xmlReader->openZip($this->path);
-            if ($xmlReader->seekOpenTag('dimension')) {
-                $this->dimension = (string)$xmlReader->getAttribute('ref');
-            }
-
+        if (!isset($this->dimension['range'])) {
+            $this->_readHeader();
         }
+
+        return $this->dimension['range'];
+    }
+
+    /**
+     * @return array
+     */
+    public function dimensionArray(): array
+    {
+        if (!isset($this->dimension['range'])) {
+            $this->_readHeader();
+        }
+
         return $this->dimension;
     }
 
     /**
      * Count rows by dimension value
      *
+     * @param string|null $range
+     *
      * @return int
      */
-    public function countRows(): int
+    public function countRows(?string $range = null): int
     {
-        $areaRange = $this->dimension();
+        // A1:C3 || A1
+        $areaRange = $range ?: $this->dimension();
         if ($areaRange && preg_match('/^([A-Za-z]+)(\d+)(:([A-Za-z]+)(\d+))?$/', $areaRange, $matches)) {
-            return (int)$matches[5] - (int)$matches[2] + 1;
+            return count($matches) === 6 ? ((int)$matches[5] - (int)$matches[2] + 1) : 1;
         }
 
         return 0;
@@ -237,26 +486,301 @@ class Sheet
     /**
      * Count columns by dimension value
      *
+     * @param string|null $range
+     *
      * @return int
      */
-    public function countColumns(): int
+    public function countColumns(?string $range = null): int
     {
-        $areaRange = $this->dimension();
+        $areaRange = $range ?: $this->dimension();
         if ($areaRange && preg_match('/^([A-Za-z]+)(\d+)(:([A-Za-z]+)(\d+))?$/', $areaRange, $matches)) {
-            return Excel::colNum($matches[4]) - Excel::colNum($matches[1]) + 1;
+            return !empty($matches[4]) ? (Excel::colNum($matches[4]) - Excel::colNum($matches[1]) + 1) : 1;
         }
 
         return 0;
     }
 
     /**
-     * Count columns by dimension value, alias of countColumns()
+     * Min row number from dimension value
+     *
+     * @param string|null $range
      *
      * @return int
      */
-    public function countCols(): int
+    public function minRow(?string $range = null): int
     {
-        return $this->countColumns();
+        $areaRange = $range ?: $this->dimension();
+        if ($areaRange && preg_match('/^([A-Za-z]+)(\d+)(:([A-Za-z]+)(\d+))?$/', $areaRange, $matches)) {
+            return (int)$matches[2];
+        }
+
+        return 0;
+    }
+
+    /**
+     * Max row number from dimension value
+     *
+     * @param string|null $range
+     *
+     * @return int
+     */
+    public function maxRow(?string $range = null): int
+    {
+        $areaRange = $range ?: $this->dimension();
+        if ($areaRange && preg_match('/^([A-Za-z]+)(\d+)(:([A-Za-z]+)(\d+))?$/', $areaRange, $matches)) {
+            return count($matches) === 6 ? (int)$matches[5] : (int)$matches[2];
+        }
+
+        return 0;
+    }
+
+    /**
+     * Min column from dimension value
+     *
+     * @param string|null $range
+     *
+     * @return string
+     */
+    public function minColumn(?string $range = null): string
+    {
+        $areaRange = $range ?: $this->dimension();
+        if ($areaRange && preg_match('/^([A-Za-z]+)(\d+)(:([A-Za-z]+)(\d+))?$/', $areaRange, $matches)) {
+            return $matches[1] ?? '';
+        }
+
+        return '';
+    }
+
+    /**
+     * Max column from dimension value
+     *
+     * @param string|null $range
+     *
+     * @return string
+     */
+    public function maxColumn(?string $range = null): string
+    {
+        $areaRange = $range ?: $this->dimension();
+        if ($areaRange && preg_match('/^([A-Za-z]+)(\d+)(:([A-Za-z]+)(\d+))?$/', $areaRange, $matches)) {
+            return $matches[4] ?? $this->minColumn($range);
+        }
+
+        return $this->minColumn($range);
+    }
+
+    /**
+     * Count columns by dimension value, alias of countColumns()
+     *
+     * @param string|null $range
+     *
+     * @return int
+     */
+    public function countCols(?string $range = null): int
+    {
+        return $this->countColumns($range);
+    }
+
+    /**
+     * @param bool $countColumns
+     * @param bool $countRows
+     * @param int $blockSize
+     *
+     * @return array
+     */
+    public function countActualDimension(bool $countColumns = true, bool $countRows = true, int $blockSize = 4096): array
+    {
+        $block1 = $block2 = null;
+        $fp = fopen('zip://' . $this->zipFilename . '#' . $this->pathInZip, 'r');
+        $minRow = $maxRow = 0;
+        $columns = [];
+        $cntBlocks = 0;
+        while (!feof($fp)) {
+            $str = fread($fp, $blockSize);
+            if ($str === false) {
+                break;
+            }
+
+            if ($block1 === null) {
+                $block1 = $str;
+                $block2 = (string)fread($fp, $blockSize);
+            }
+            else {
+                $block2 = $str;
+            }
+
+            $txt = $block1 . $block2;
+            if (!$txt) {
+                break;
+            }
+
+            if ($countRows && !$this->actualRows) {
+                if (preg_match_all('/<row\s+([^>]+)/', $txt, $matches)) {
+                    if ($minRow === 0) {
+                        $attr = reset($matches[1]);
+                        if ($attr && preg_match('/r\s*=\s*"?(\d+)"?/', $attr, $m)) {
+                            $minRow = (int)$m[1];
+                        }
+                    }
+                    $attr = end($matches[1]);
+                    if ($attr && preg_match('/r\s*=\s*"?(\d+)"?/', $attr, $m)) {
+                        $rowNum = (int)$m[1];
+                        if ($maxRow === 0 || $rowNum >= $maxRow) {
+                            $maxRow = $rowNum;
+                        }
+                    }
+                }
+            }
+
+            if ($countColumns && !$this->actualCols) {
+                if (preg_match_all('/<c\s+([^>]+)/', $txt, $matches)) {
+                    foreach ($matches[1] as $attr) {
+                        if (preg_match('/r\s*=\s*"?([A-Z]+)(\d+)"?/', $attr, $m) && !empty($m[1]) && !isset($columns[$m[1]])) {
+                            $columns[$m[1]] = \avadim\FastExcelHelper\Helper::colNumber($m[1]);
+                        }
+                    }
+                }
+            }
+
+            $block1 = $block2;
+        }
+        fclose($fp);
+
+        if ($countColumns && !$this->actualCols) {
+            asort($columns);
+            $this->actualCols['min'] = array_key_first($columns);
+            $this->actualCols['max'] = array_key_last($columns);
+            $this->actualCols['count'] = $columns[$this->actualCols['max']] - $columns[$this->actualCols['min']] + 1;
+        }
+        if ($countRows && !$this->actualRows) {
+            $this->actualRows['min'] = $minRow;
+            $this->actualRows['max'] = $maxRow;
+            $this->actualRows['count'] = $maxRow - $minRow + 1;
+        }
+
+        return [
+            'rows' => $this->actualRows,
+            'cols' => $this->actualCols,
+        ];
+    }
+
+    /**
+     * Returns the actual number of rows from the sheet data area
+     *
+     * @return int
+     */
+    public function countActualRows(): int
+    {
+        if (!$this->actualRows) {
+            $this->countActualDimension(false);
+        }
+
+        return $this->actualRows['count'] ?? 0;
+    }
+
+    /**
+     * @return int
+     */
+    public function minActualRow(): int
+    {
+        if (!$this->actualRows) {
+            $this->countActualDimension(false);
+        }
+
+        return $this->actualRows['min'] ?? 0;
+    }
+
+    /**
+     * @return int
+     */
+    public function maxActualRow(): int
+    {
+        if (!$this->actualRows) {
+            $this->countActualDimension(false);
+        }
+
+        return $this->actualRows['max'] ?? 0;
+    }
+
+    /**
+     * Returns the actual number of columns from the sheet data area
+     *
+     * @return int
+     */
+    public function countActualColumns(): int
+    {
+        if (!$this->actualCols) {
+            $this->countActualDimension(true, false);
+        }
+
+        return $this->actualCols['count'] ?? 0;
+    }
+
+    /**
+     * @return string
+     */
+    public function minActualColumn(): string
+    {
+        if (!$this->actualCols) {
+            $this->countActualDimension(true, false);
+        }
+
+        return $this->actualCols['min'] ?? '';
+    }
+
+    /**
+     * @return string
+     */
+    public function maxActualColumn(): string
+    {
+        if (!$this->actualCols) {
+            $this->countActualDimension(true, false);
+        }
+
+        return $this->actualCols['max'] ?? '';
+    }
+
+    /**
+     * @return string
+     */
+    public function actualDimension(): string
+    {
+        $minCell = $maxCell = '';
+        $dim = $this->countActualDimension();
+        if (isset($dim['rows']['min'], $dim['cols']['min'])) {
+            $minCell = $dim['cols']['min'] . $dim['rows']['min'];
+        }
+        if (isset($dim['rows']['max'], $dim['cols']['max'])) {
+            $maxCell = $dim['cols']['max'] . $dim['rows']['max'];
+        }
+        if ($minCell && !$maxCell) {
+            return $minCell;
+        }
+        if (!$minCell && $maxCell) {
+            return $maxCell;
+        }
+
+        return $minCell . ':' . $maxCell;
+    }
+
+    /**
+     * @return array
+     */
+    public function getColAttributes(): array
+    {
+        $result = [];
+        if ($this->cols) {
+            foreach ($this->cols as $colAttributes) {
+                if (isset($colAttributes['min'])) {
+                    $col = Helper::colLetter($colAttributes['min']);
+                    $result[$col] = $colAttributes;
+                }
+                else {
+                    $result[] = $colAttributes;
+                }
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -276,33 +800,33 @@ class Sheet
         $area = [];
         $area['col_keys'] = [];
         if (preg_match('/^\$?([A-Za-z]+)\$?(\d+)(:\$?([A-Za-z]+)\$?(\d+))?$/', $areaRange, $matches)) {
-            $area['col_min'] = Excel::colNum($matches[1]);
+            $area['col_min'] = Helper::colNumber($matches[1]);
             $area['row_min'] = (int)$matches[2];
             if (empty($matches[3])) {
-                $area['col_max'] = Excel::EXCEL_2007_MAX_COL;
-                $area['row_max'] = Excel::EXCEL_2007_MAX_ROW;
+                $area['col_max'] = Helper::EXCEL_2007_MAX_COL;
+                $area['row_max'] = Helper::EXCEL_2007_MAX_ROW;
             }
             else {
-                $area['col_max'] = Excel::colNum($matches[4]);
+                $area['col_max'] = Helper::colNumber($matches[4]);
                 $area['row_max'] = (int)$matches[5];
                 for ($col = $area['col_min']; $col <= $area['col_max']; $col++) {
-                    $area['col_keys'][Excel::colLetter($col)] = null;
+                    $area['col_keys'][Helper::colLetter($col)] = null;
                 }
             }
         }
         elseif (preg_match('/^([A-Za-z]+)(:([A-Za-z]+))?$/', $areaRange, $matches)) {
-            $area['col_min'] = Excel::colNum($matches[1]);
+            $area['col_min'] = Helper::colNumber($matches[1]);
             if (empty($matches[2])) {
-                $area['col_max'] = Excel::EXCEL_2007_MAX_COL;
+                $area['col_max'] = Helper::EXCEL_2007_MAX_COL;
             }
             else {
-                $area['col_max'] = Excel::colNum($matches[3]);
+                $area['col_max'] = Helper::colNumber($matches[3]);
                 for ($col = $area['col_min']; $col <= $area['col_max']; $col++) {
-                    $area['col_keys'][Excel::colLetter($col)] = null;
+                    $area['col_keys'][Helper::colLetter($col)] = null;
                 }
             }
             $area['row_min'] = 1;
-            $area['row_max'] = Excel::EXCEL_2007_MAX_ROW;
+            $area['row_max'] = Helper::EXCEL_2007_MAX_ROW;
         }
         if (isset($area['col_min'], $area['col_max']) && ($area['col_min'] < 0 || $area['col_max'] < 0)) {
             return [];
@@ -378,7 +902,7 @@ class Sheet
      *
      * @return array
      */
-    public function readRows($columnKeys = [], int $resultMode = null, ?bool $styleIdxInclude = null): array
+    public function readRows($columnKeys = [], ?int $resultMode = null, ?bool $styleIdxInclude = null): array
     {
         $data = [];
         if (is_int($columnKeys) && !is_int($resultMode)) {
@@ -412,14 +936,22 @@ class Sheet
     }
 
     /**
-     * Returns values and styles of cells as array ['v' => _value_, 's' => _styles_]
+     * Returns values, styles and other info of cells as array
+     *
+     * [
+     *      'v' => _value_,
+     *      's' => _styles_,
+     *      'f' => _formula_,
+     *      't' => _type_,
+     *      'o' => '_original_value_
+     * ]
      *
      * @param array|bool|int|null $columnKeys
      * @param int|null $resultMode
      *
      * @return array
      */
-    public function readRowsWithStyles($columnKeys = [], int $resultMode = null): array
+    public function readRowsWithStyles($columnKeys = [], ?int $resultMode = null): array
     {
         $data = $this->readRows($columnKeys, $resultMode, true);
 
@@ -542,7 +1074,7 @@ class Sheet
      *
      * @return array
      */
-    public function readColumns($columnKeys = null, int $resultMode = null, ?bool $styleIdxInclude = null): array
+    public function readColumns($columnKeys = null, ?int $resultMode = null, ?bool $styleIdxInclude = null): array
     {
         if (is_int($columnKeys) && $columnKeys > 1 && $resultMode === null) {
             $resultMode = $columnKeys | Excel::KEYS_RELATIVE;
@@ -563,7 +1095,7 @@ class Sheet
      *
      * @return array
      */
-    public function readColumnsWithStyles($columnKeys = null, int $resultMode = null): array
+    public function readColumnsWithStyles($columnKeys = null, ?int $resultMode = null): array
     {
         $data = $this->readColumns($columnKeys, $resultMode, true);
 
@@ -596,16 +1128,29 @@ class Sheet
     }
 
     /**
-     * Returns values and styles of cells as array ['v' => _value_, 's' => _styles_]
+     * Returns values and styles of cells as array:
+     *      'v' => _value_
+     *      's' => _styles_
+     *      'f' => _formula_
+     *      't' => _type_
+     *      'o' => _original_value_
+     *
+     * @param $styleKey
      *
      * @return array
      */
-    public function readCellsWithStyles(): array
+    public function readCellsWithStyles($styleKey = null): array
     {
         $data = $this->readCells(true);
         foreach ($data as $cell => $cellData) {
             if (isset($cellData['s'])) {
-                $data[$cell]['s'] = $this->excel->getCompleteStyleByIdx($cellData['s']);
+                $style = $this->excel->getCompleteStyleByIdx($cellData['s']);
+                if ($styleKey && isset($style[$styleKey])) {
+                    $data[$cell]['s'] = [$styleKey => $style[$styleKey]];
+                }
+                else {
+                    $data[$cell]['s'] = $style;
+                }
             }
         }
 
@@ -651,9 +1196,12 @@ class Sheet
      * @param int|null $resultMode
      * @param bool|null $styleIdxInclude
      */
-    public function readCallback(callable $callback, $columnKeys = [], int $resultMode = null, ?bool $styleIdxInclude = null)
+    public function readCallback(callable $callback, $columnKeys = [], ?int $resultMode = null, ?bool $styleIdxInclude = null)
     {
         foreach ($this->nextRow($columnKeys, $resultMode, $styleIdxInclude) as $row => $rowData) {
+            if (isset($rowData['__cells'], $rowData['__row'])) {
+                $rowData = $rowData['__cells'];
+            }
             foreach ($rowData as $col => $val) {
                 if (isset($this->area['col_keys']) && array_key_exists($col, $this->area['col_keys'])
                     || (!is_array($val) && $val !== null) || isset($val['v']) || isset($val['f']) || isset($val['s'])) {
@@ -683,13 +1231,11 @@ class Sheet
      *
      * @return \Generator|null
      */
-    public function nextRow($columnKeys = [], int $resultMode = null, ?bool $styleIdxInclude = null, int $rowLimit = 0): ?\Generator
+    public function nextRow($columnKeys = [], ?int $resultMode = null, ?bool $styleIdxInclude = null, ?int $rowLimit = 0): ?\Generator
     {
         // <dimension ref="A1:C1"/>
         // sometimes sheets doesn't contain this tag
-        if ($this->dimension === null) {
-            $this->dimension();
-        }
+        $this->dimension();
 
         if (!$columnKeys && is_int($resultMode) && ($resultMode & Excel::KEYS_FIRST_ROW)) {
             $firstRowValues = $this->readFirstRow();
@@ -718,15 +1264,21 @@ class Sheet
                 break;
             }
         }
+        $this->readRowNum = $this->countReadRows = 0;
 
         $xmlReader = $this->getReader();
-        $xmlReader->openZip($this->path);
+        $xmlReader->openZip($this->pathInZip);
 
         $rowData = $rowTemplate;
         $rowNum = 0;
         $rowOffset = $colOffset = null;
         $row = -1;
         $rowCnt = -1;
+
+        if ($this->preReadFunc) {
+            ($this->preReadFunc)($xmlReader);
+        }
+
         if ($xmlReader->seekOpenTag('sheetData')) {
             while ($xmlReader->read()) {
                 if ($rowLimit > 0 && $rowCnt >= $rowLimit) {
@@ -735,24 +1287,42 @@ class Sheet
                 if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'sheetData') {
                     break;
                 }
+                if ($this->readNodeFunc && isset($this->readNodeFunc[$xmlReader->name])) {
+                    ($this->readNodeFunc[$xmlReader->name])($xmlReader->expand());
+                }
 
-                if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'row' && $rowNum >= $readArea['row_min'] && $rowNum <= $readArea['row_max']) {
-                    if ($rowCnt === 0 && $firstRowKeys) {
-                        if (!$columnKeys) {
-                            if ($styleIdxInclude) {
-                                $columnKeys = array_combine(array_keys($rowData), array_column($rowData, 'v'));
+                if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'row') {
+                    //$this->countReadRows++;
+                    if ($rowNum >= $readArea['row_min'] && $rowNum <= $readArea['row_max']) {
+                        $this->readRowNum = $rowNum;
+                        if ($rowCnt === 0 && $firstRowKeys) {
+                            if (!$columnKeys) {
+                                if ($styleIdxInclude) {
+                                    $columnKeys = array_combine(array_keys($rowData), array_column($rowData, 'v'));
+                                }
+                                else {
+                                    $columnKeys = $rowData;
+                                }
+                                $rowTemplate = array_fill_keys(array_keys($columnKeys), null);
                             }
-                            else {
-                                $columnKeys = $rowData;
-                            }
-                            $rowTemplate = array_fill_keys(array_keys($columnKeys), null);
                         }
+                        else {
+                            if ($resultMode & Excel::RESULT_MODE_ROW) {
+                                $rowNode = $xmlReader->expand();
+                                $rowAttributes = [];
+                                foreach ($rowNode->attributes as $key => $val) {
+                                    $rowAttributes[$key] = $val->value;
+                                }
+                                $rowData = [
+                                    '__cells' => $rowData,
+                                    '__row' => $rowAttributes,
+                                ];
+                            }
+                            $row = $rowNum - $rowOffset;
+                            yield $row => $rowData;
+                        }
+                        continue;
                     }
-                    else {
-                        $row = $rowNum - $rowOffset;
-                        yield $row => $rowData;
-                    }
-                    continue;
                 }
 
                 if ($xmlReader->nodeType === \XMLReader::ELEMENT) {
@@ -778,6 +1348,19 @@ class Sheet
                                     $rowOffset = $rowNum - 1 + ($firstRowKeys ? 1 : 0);
                                 }
                             }
+                        }
+                        if ($xmlReader->isEmptyElement && ($resultMode & Excel::RESULT_MODE_ROW)) {
+                            $rowNode = $xmlReader->expand();
+                            $rowAttributes = [];
+                            foreach ($rowNode->attributes as $key => $val) {
+                                $rowAttributes[$key] = $val->value;
+                            }
+                            $rowData = [
+                                '__cells' => $rowData,
+                                '__row' => $rowAttributes,
+                            ];
+                            $row = $rowNum - $rowOffset;
+                            yield $row => $rowData;
                         }
                     } // <row ...> - tag row end
 
@@ -813,12 +1396,18 @@ class Sheet
                                 if (is_array($columnKeys) && isset($columnKeys[$colLetter])) {
                                     $col = $columnKeys[$colLetter];
                                 }
-                                $value = $this->_cellValue($cell, $styleIdx, $formula, $dataType);
+                                ///$value = $this->_cellValue($cell, $styleIdx, $formula, $dataType, $originalValue);
+                                $value = $this->_cellValue($cell, $additionalData);
                                 if ($styleIdxInclude) {
-                                    $rowData[$col] = ['v' => $value, 's' => $styleIdx, 'f' => $formula, 't' => $dataType];
+                                    $rowData[$col] = $additionalData;
                                 }
                                 else {
-                                    $rowData[$col] = $value;
+                                    if (is_string($value) && ($resultMode & Excel::TRIM_STRINGS)) {
+                                        $value = trim($value);
+                                    }
+                                    if (!($value === '' && ($resultMode & Excel::TREAT_EMPTY_STRING_AS_EMPTY_CELL))) {
+                                        $rowData[$col] = $value;
+                                    }
                                 }
                             }
                         }
@@ -826,13 +1415,122 @@ class Sheet
                 }
             }
         }
-        /*
-        if ($row > -1 && $rowData) {
-            yield $row => $rowData;
+
+        if ($this->postReadFunc) {
+            ($this->postReadFunc)($xmlReader);
         }
-        */
 
         $xmlReader->close();
+
+        return null;
+    }
+
+    /**
+     * Reset read generator
+     *
+     * @param array|bool|int|null $columnKeys
+     * @param int|null $resultMode
+     * @param bool|null $styleIdxInclude
+     * @param int|null $rowLimit
+     *
+     * @return \Generator|null
+     */
+    public function reset($columnKeys = [], ?int $resultMode = null, ?bool $styleIdxInclude = null, ?int $rowLimit = 0): ?\Generator
+    {
+        $this->generator = $this->nextRow($columnKeys, $resultMode, $styleIdxInclude, $rowLimit);
+        $this->countReadRows = 0;
+
+        return $this->generator;
+    }
+
+    /**
+     * Rewind read generator, alias of reset()
+     *
+     * @param array|bool|int|null $columnKeys
+     * @param int|null $resultMode
+     * @param bool|null $styleIdxInclude
+     * @param int|null $rowLimit
+     *
+     * @return \Generator|null
+     */
+    public function rewind($columnKeys = [], ?int $resultMode = null, ?bool $styleIdxInclude = null, ?int $rowLimit = 0): ?\Generator
+    {
+
+        return $this->reset($columnKeys = [], $resultMode, $styleIdxInclude, $rowLimit);
+    }
+
+    /**
+     * @return mixed
+     */
+    public function readNextRow()
+    {
+        if (!$this->generator) {
+            $this->reset();
+        }
+        if ($this->countReadRows > 0) {
+            $this->generator->next();
+        }
+        if ($result = $this->generator->current()) {
+            $this->countReadRows++;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return int
+     */
+    public function getReadRowNum(): int
+    {
+        return $this->readRowNum;
+    }
+
+    /**
+     * Returns all merged ranges
+     *
+     * @return array|null
+     */
+    public function getMergedCells(): ?array
+    {
+        if ($this->mergedCells === null) {
+            $this->_readBottom();
+        }
+
+        return $this->mergedCells;
+    }
+
+    /**
+     * Checks if a cell is merged
+     *
+     * @param string $cellAddress
+     *
+     * @return bool
+     */
+    public function isMerged(string $cellAddress): bool
+    {
+        foreach ($this->getMergedCells() as $range) {
+            if (Helper::inRange($cellAddress, $range)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Returns merge range of specified cell
+     *
+     * @param string $cellAddress
+     *
+     * @return string|null
+     */
+    public function mergedRange(string $cellAddress): ?string
+    {
+        foreach ($this->getMergedCells() as $range) {
+            if (Helper::inRange($cellAddress, $range)) {
+                return $range;
+            }
+        }
 
         return null;
     }
@@ -842,9 +1540,24 @@ class Sheet
      */
     protected function drawingFilename(): ?string
     {
-        $findName = str_replace('/worksheets/sheet', '/drawings/drawing', $this->path);
+        $findName = str_replace('/worksheets/sheet', '/drawings/drawing', $this->pathInZip);
 
         return in_array($findName, $this->excel->innerFileList(), true) ? $findName : null;
+    }
+
+    /**
+     * @param string $cell
+     * @param string $fileName
+     * @param string|null $imageName
+     *
+     * @return void
+     */
+    protected function addImage(string $cell, string $fileName, ?string $imageName = null)
+    {
+        $this->images[$cell] = [
+            'image_name' => $imageName,
+            'file_name' => $fileName,
+        ];
     }
 
     /**
@@ -925,10 +1638,37 @@ class Sheet
                 }
                 $result['images'][$addr] = $media;
                 $result['rows'][$media['row']][] = $addr;
+                $this->addImage($addr, basename($media['target']), $media['name']);
             }
         }
 
         return $result;
+    }
+
+    protected function extractRichValueImages()
+    {
+        $xmlReader = $this->getReader();
+        $xmlReader->openZip($this->pathInZip);
+        while ($xmlReader->read()) {
+            // seek <sheetData>
+            if ($xmlReader->name === 'sheetData') {
+                break;
+            }
+        }
+        while ($xmlReader->read()) {
+            // loop until </sheetData>
+            if ($xmlReader->name === 'sheetData' && $xmlReader->nodeType === \XMLReader::END_ELEMENT) {
+                break;
+            }
+            if ($xmlReader->name === 'c' && $xmlReader->nodeType === \XMLReader::ELEMENT) {
+                $vm = (string)$xmlReader->getAttribute('vm');
+                $cell = (string)$xmlReader->getAttribute('r');
+                if ($vm && ($imageFile = $this->excel->metadataImage($vm))) {
+                    $this->addImage($cell, basename($imageFile));
+                }
+            }
+        }
+        $xmlReader->close();
     }
 
     /**
@@ -940,9 +1680,29 @@ class Sheet
     }
 
     /**
+     * Count images of the sheet
+     *
      * @return int
      */
     public function countImages(): int
+    {
+        if ($this->countImages === -1) {
+            $this->_countDrawingsImages();
+            if ($this->excel->hasExtraImages()) {
+                $this->extractRichValueImages();
+            }
+            $this->countImages = count($this->images);
+        }
+
+        return $this->countImages;
+    }
+
+    /**
+     * Count images form drawings of the sheet
+     *
+     * @return int
+     */
+    public function _countDrawingsImages(): int
     {
         $result = 0;
         if ($this->hasDrawings()) {
@@ -965,22 +1725,31 @@ class Sheet
     /**
      * @return array
      */
-    public function getImageList(): array
+    public function _getDrawingsImageFiles(): array
     {
         $result = [];
-        if ($this->countImages()) {
-            foreach ($this->props['drawings']['images'] as $addr => $image) {
-                $result[$addr] = [
-                    'image_name' => $image['name'],
-                    'file_name' => basename($image['target']),
-                ];
-            }
+        if ($this->_countDrawingsImages()) {
+            $result = array_column($this->props['drawings']['images'], 'target');
         }
 
         return $result;
     }
 
     /**
+     * @return array
+     */
+    public function getImageList(): array
+    {
+        if ($this->countImages()) {
+            return $this->images;
+        }
+
+        return [];
+    }
+
+    /**
+     * @param $row
+     *
      * @return array
      */
     public function getImageListByRow($row): array
@@ -1010,8 +1779,7 @@ class Sheet
     public function hasImage(string $cell): bool
     {
         if ($this->countImages()) {
-
-            return isset($this->props['drawings']['images'][strtoupper($cell)]);
+            return isset($this->images[strtoupper($cell)]);
         }
 
         return false;
@@ -1124,6 +1892,439 @@ class Sheet
     {
         $filename = basename($this->props['drawings']['images'][strtoupper($cell)]['target']);
 
-        return $this->saveImage($cell, str_replace(['\\', '/'], '', $dirname) . DIRECTORY_SEPARATOR . $filename);
+        return $this->saveImage($cell, str_replace(['\\', '/'], DIRECTORY_SEPARATOR, $dirname) . DIRECTORY_SEPARATOR . $filename);
+    }
+
+    /**
+     * Returns an array of data validation rules found in the sheet
+     *
+     * @return array<array{
+     *   type: string,
+     *   sqref: string,
+     *   formula1: ?string,
+     *   formula2: ?string,
+     *  }>
+     */
+    public function getDataValidations(): array
+    {
+        if ($this->validations === null) {
+            $this->extractDataValidations();
+        }
+
+        return $this->validations;
+    }
+
+    /** Extracts data validation rules from the sheet */
+    public function extractDataValidations(): void
+    {
+        $validations = [];
+        $xmlReader = $this->getReader();
+        $xmlReader->openZip($this->pathInZip);
+
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT) {
+                // Standard data validation
+                if ($xmlReader->name === 'dataValidation') {
+                    $validation = $this->parseDataValidation($xmlReader);
+                    if ($validation) {
+                        $validations[] = $validation;
+                    }
+                }
+
+                // Extended data validation
+                if ($xmlReader->name === 'x14:dataValidation') {
+                    $validation = $this->parseExtendedDataValidation($xmlReader);
+                    if ($validation) {
+                        $validations[] = $validation;
+                    }
+                }
+            }
+        }
+
+        $xmlReader->close();
+
+        $this->validations = $validations;
+    }
+
+    /**
+     * Parse standard <dataValidation>
+     *
+     * @param InterfaceXmlReader $xmlReader
+     *
+     * @return array{
+     *    type: string,
+     *    sqref: string,
+     *    formula1: ?string,
+     *    formula2: ?string,
+     *  }
+     */
+    protected function parseDataValidation(InterfaceXmlReader $xmlReader): ?array
+    {
+        $type = $xmlReader->getAttribute('type');
+        $sqref = $xmlReader->getAttribute('sqref');
+        $formula1 = null;
+        $formula2 = null;
+
+        // Check if it's a self-closing tag
+        if ($xmlReader->isEmptyElement) {
+            return [
+                'type' => $type,
+                'sqref' => $sqref,
+                'formula1' => $formula1,
+                'formula2' => $formula2
+            ];
+        }
+
+        // Handle child nodes like formula1 and formula2
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'formula1') {
+                $xmlReader->read();
+                $formula1 = $xmlReader->value;
+            } elseif ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'formula2') {
+                $xmlReader->read();
+                $formula2 = $xmlReader->value;
+            }
+            if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'dataValidation') {
+                break;
+            }
+        }
+
+        return [
+            'type' => $type,
+            'sqref' => $sqref,
+            'formula1' => $formula1,
+            'formula2' => $formula2
+        ];
+    }
+
+    /**
+     * Parse extended <x14:dataValidation>
+     *
+     * @param InterfaceXmlReader $xmlReader
+     *
+     * @return array{
+     *    type: string,
+     *    sqref: string,
+     *    formula1: ?string,
+     *    formula2: ?string,
+     *  }
+     */
+    protected function parseExtendedDataValidation(InterfaceXmlReader $xmlReader): array
+    {
+        $type = $xmlReader->getAttribute('type');
+        $sqref = null;
+        $formula1 = null;
+        $formula2 = null;
+
+        // Check if it's a self-closing tag
+        if ($xmlReader->isEmptyElement) {
+            return [
+                'type' => $type,
+                'sqref' => $sqref,
+                'formula1' => $formula1,
+                'formula2' => $formula2
+            ];
+        }
+
+        // Parse the attributes within the <x14:dataValidation> tag
+        while ($xmlReader->read()) {
+            // Parse the sqref (cell range)
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'xm:sqref') {
+                $xmlReader->read();
+                $sqref = $xmlReader->value;
+            }
+
+            // Capture formula1 and extract inner <xm:f> value
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'x14:formula1') {
+                while ($xmlReader->read()) {
+                    if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'xm:f') {
+                        $xmlReader->read();
+                        $formula1 = $xmlReader->value;
+                        break;
+                    }
+                }
+            }
+
+            // Capture formula2 and extract inner <xm:f> value
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'x14:formula2') {
+                while ($xmlReader->read()) {
+                    if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'xm:f') {
+                        $xmlReader->read();
+                        $formula2 = $xmlReader->value;
+                        break;
+                    }
+                }
+            }
+
+            // Break when reaching the end of <x14:dataValidation>
+            if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'x14:dataValidation') {
+                break;
+            }
+        }
+
+        return [
+            'type' => $type,
+            'sqref' => $sqref,
+            'formula1' => $formula1,
+            'formula2' => $formula2
+        ];
+    }
+
+    /**
+     * Returns an array of data validation rules found in the sheet
+     *
+     * @return array<array{
+     *   type: string,
+     *   sqref: string,
+     *   attributes: array
+     * }>
+     */
+    public function getConditionalFormatting(): array
+    {
+        if ($this->conditionals === null) {
+            $this->extractConditionalFormatting();
+        }
+
+        return $this->conditionals;
+    }
+
+    /** Extracts conditional formatting rules from the sheet */
+    public function extractConditionalFormatting(): void
+    {
+        $conditionals = [];
+        $xmlReader = $this->getReader();
+        $xmlReader->openZip($this->pathInZip);
+
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'conditionalFormatting') {
+                $conditional = $this->parseConditionalFormatting($xmlReader);
+                if ($conditional) {
+                    $conditionals[] = $conditional;
+                }
+            }
+        }
+
+        $xmlReader->close();
+
+        $this->conditionals = $conditionals;
+    }
+
+    /**
+     * Parse <conditionalFormatting>
+     *
+     * @param InterfaceXmlReader $xmlReader
+     *
+     * @return array{
+     *    type: string,
+     *    sqref: string,
+     *    attributes: []
+     *  }
+     */
+    protected function parseConditionalFormatting(InterfaceXmlReader $xmlReader): ?array
+    {
+        $sqref = $xmlReader->getAttribute('sqref');
+        $attributes = [];
+
+        // Handle child nodes like formula1 and formula2
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'cfRule') {
+                $node = $xmlReader->expand();
+                foreach ($node->attributes as $key => $val) {
+                    $attributes[$key] = $val->value;
+                }
+            }
+            if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'conditionalFormatting') {
+                break;
+            }
+        }
+
+        return [
+            'type' => $attributes['type'] ?? null,
+            'sqref' => $sqref,
+            'attributes' => $attributes,
+        ];
+    }
+
+    public function setDefaultRowHeight(float $rowHeight): void
+    {
+        $this->defaultRowHeight = $rowHeight;
+    }
+
+    /**
+     * Parses and retrieves column widths and row heights from the sheet XML.
+     *
+     * @return void
+     */
+    protected function extractColumnWidthsAndRowHeights(): void
+    {
+        $this->colWidths = [];
+        $this->rowHeights = [];
+
+        $xmlReader = $this->getReader();
+        $xmlReader->openZip($this->pathInZip);
+
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT) {
+                // Extract column width
+                if ($xmlReader->name === 'col') {
+                    $min = (int)$xmlReader->getAttribute('min');
+                    $max = (int)$xmlReader->getAttribute('max');
+                    $width = (float)$xmlReader->getAttribute('width');
+
+                    for ($i = $min; $i <= $max; $i++) {
+                        $this->colWidths[$i] = $width;
+                    }
+                }
+                // Extract row height
+                elseif ($xmlReader->name === 'row') {
+                    $rowIndex = (int)$xmlReader->getAttribute('r');
+                    $height = $xmlReader->getAttribute('ht') ? (float)$xmlReader->getAttribute('ht') : $this->defaultRowHeight;
+                    $this->rowHeights[$rowIndex] = $height;
+                }
+            }
+        }
+
+        $xmlReader->close();
+    }
+
+    /**
+     * Returns column width for a specific column number.
+     *
+     * @param int $colNumber
+     * @return float|null
+     */
+    public function getColumnWidth(int $colNumber): ?float
+    {
+        if ($this->colWidths === null) {
+            $this->extractColumnWidthsAndRowHeights();
+        }
+        return $this->colWidths[$colNumber] ?? null;
+    }
+
+    /**
+     * Returns row height for a specific row number.
+     *
+     * @param int $rowNumber
+     *
+     * @return float|null
+     */
+    public function getRowHeight(int $rowNumber): ?float
+    {
+        if ($this->rowHeights === null) {
+            $this->extractColumnWidthsAndRowHeights();
+        }
+        return $this->rowHeights[$rowNumber] ?? null;
+    }
+
+    /**
+     * Parses and retrieves frozen pane info from the sheet XML
+     *
+     * @return array|null
+     */
+    public function getFreezePaneInfo(): ?array
+    {
+        $xmlReader = $this->getReader();
+        $xmlReader->openZip($this->pathInZip);
+
+        $freezePane = null;
+
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'pane') {
+                $xSplit = (int)$xmlReader->getAttribute('xSplit');
+                $ySplit = (int)$xmlReader->getAttribute('ySplit');
+                $topLeftCell = $xmlReader->getAttribute('topLeftCell');
+
+                $freezePane = [
+                    'xSplit' => $xSplit,
+                    'ySplit' => $ySplit,
+                    'topLeftCell' => $topLeftCell,
+                ];
+                break;
+            }
+        }
+        $xmlReader->close();
+
+        return $freezePane;
+    }
+
+    /**
+     * Alias of getFreezePaneInfo()
+     *
+     * @return array|null
+     */
+    public function getFreezePaneConfig0(): ?array
+    {
+        return $this->readCells();
+    }
+
+    /**
+     * Extracts the tab properties from the sheet XML
+     *
+     * @return void
+     */
+    protected function _readTabProperties(): void
+    {
+        if ($this->tabProperties !== null) {
+            return;
+        }
+
+        $this->tabProperties = [
+            'color' => null,
+        ];
+
+        $xmlReader = $this->getReader();
+        $xmlReader->openZip($this->pathInZip);
+
+        while ($xmlReader->read()) {
+            if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'sheetPr') {
+                while ($xmlReader->read()) {
+                    if ($xmlReader->nodeType === \XMLReader::ELEMENT && $xmlReader->name === 'tabColor') {
+                        $this->tabProperties['color'] = [
+                            'rgb' => $xmlReader->getAttribute('rgb'),
+                            'theme' => $xmlReader->getAttribute('theme'),
+                            'tint' => $xmlReader->getAttribute('tint'),
+                            'indexed' => $xmlReader->getAttribute('indexed'),
+                        ];
+
+                        $this->tabProperties['color'] = array_filter(
+                            $this->tabProperties['color'],
+                            static fn($value) => $value !== null
+                        );
+                        break;
+                    }
+                    if ($xmlReader->nodeType === \XMLReader::END_ELEMENT && $xmlReader->name === 'sheetPr') {
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        $xmlReader->close();
+    }
+
+    /**
+     * Returns the tab color info of the sheet
+     * Contains any of: rgb, theme, tint, indexed
+     *
+     * @return array|null
+     */
+    public function getTabColorInfo(): ?array
+    {
+        if ($this->tabProperties === null) {
+            $this->_readTabProperties();
+        }
+
+        return $this->tabProperties['color'] ?? null;
+    }
+
+    /**
+     * Alias of getTabColorConfig()
+     *
+     * @return array|null
+     */
+    public function getTabColorConfiguration(): ?array
+    {
+        return $this->getTabColorInfo();
     }
 }
